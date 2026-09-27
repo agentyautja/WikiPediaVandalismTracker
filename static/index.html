@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vandalism Tracker</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M32 4 8 13v17c0 15 10 26 24 30 14-4 24-15 24-30V13z' fill='%23d73333'/%3E%3Ctext x='32' y='43' font-size='28' text-anchor='middle' fill='white' font-family='Georgia,serif' font-weight='bold'%3EW%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="page">
+  <header class="top">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 64 64" aria-hidden="true">
+        <path d="M32 4 8 13v17c0 15 10 26 24 30 14-4 24-15 24-30V13z"/>
+        <text x="32" y="43">W</text>
+      </svg>
+      <div>
+        <h1>Wikipedia Vandalism Tracker</h1>
+        <p class="tagline">Confirmed vandalism on English Wikipedia, double-checked and already cleaned up</p>
+      </div>
+    </div>
+    <div id="status-pill" class="pill"><span class="dot"></span><span class="pill-text">Connecting…</span></div>
+  </header>
+
+  <section class="pipeline" aria-label="Detection pipeline">
+    <div class="stage">
+      <span class="num" id="n-scanned">–</span>
+      <span class="lbl">edits scanned</span>
+    </div>
+    <span class="arrow" aria-hidden="true">→</span>
+    <div class="stage">
+      <span class="num" id="n-check1">–</span>
+      <span class="lbl">Check 1 · likely bad faith</span>
+    </div>
+    <span class="arrow" aria-hidden="true">→</span>
+    <div class="stage accent">
+      <span class="num" id="n-check2">–</span>
+      <span class="lbl">Check 2 · confirmed &amp; cleaned up</span>
+    </div>
+  </section>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <details class="how">
+    <summary>How does it decide what's vandalism?</summary>
+    <ol>
+      <li><b>Scan.</b> The tracker reads Wikipedia's RecentChanges feed (the same one as
+        <a href="https://en.wikipedia.org/wiki/Special:RecentChanges?hidebots=1&hidecategorization=1&hideWikibase=1&limit=50&days=1&urlversion=2" target="_blank" rel="noopener">this page</a>:
+        no bots, no category changes, no Wikidata) and looks at every human edit to an article.</li>
+      <li><b>Check 1 — bad faith.</b> Wikipedia's own ORES "good faith" model scores each edit. Edits it thinks are
+        at least <span id="how-threshold">50%</span> likely to be made in bad faith become candidates.</li>
+      <li><b>Check 2 — is it really vandalism?</b> Every candidate is examined, then re-checked at
+        <span id="how-schedule">1, 3, 6 … 120</span> minutes after the edit. It looks at the text that was added
+        (swearing, insults, gibberish, blanking…), Wikipedia's edit-filter tags, an independent machine-learning model
+        (Wikimedia's revert-risk model), and how Wikipedians reacted: was it reverted as vandalism, was the vandal
+        blocked, did admins hide or delete it?</li>
+      <li><b>Shown here.</b> Only edits that check 2 <b>confirms</b> as vandalism <b>and</b> that Wikipedia has already
+        cleaned up. Everything else keeps being re-checked in the background and appears as soon as it is confirmed and
+        cleaned up.</li>
+      <li><b>Links.</b> Each one links to the vandalized version (a permanent link to the page exactly as the vandal
+        left it), plus the diff.</li>
+    </ol>
+  </details>
+
+  <nav class="toolbar">
+    <div class="tabs" id="views" role="tablist"></div>
+    <div class="tools">
+      <input type="search" id="search" placeholder="Search title, user or text…" aria-label="Search">
+      <select id="sort" aria-label="Sort">
+        <option value="newest">Newest first</option>
+        <option value="confidence">Most certain first</option>
+      </select>
+    </div>
+  </nav>
+
+  <div class="filters">
+    <div class="chiprow" id="category-chips" aria-label="Category"></div>
+  </div>
+
+  <main id="list" aria-live="polite"></main>
+  <div class="footer-row">
+    <button id="more" class="btn" hidden>Load more</button>
+    <span id="count" class="muted"></span>
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>
