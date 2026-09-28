@@ -15,6 +15,7 @@ import webbrowser
 
 import config
 from tracker.db import Database
+from tracker.history import HistorySearcher
 from tracker.monitor import Monitor
 from tracker.web import create_app
 from tracker.wiki import WikiClient
@@ -51,12 +52,16 @@ def main():
     wiki = WikiClient(config.WIKI_DOMAIN, config.WIKI_LANG, config.CONTACT, profile["api_per_minute"])
     monitor = Monitor(db, wiki, profile)
     monitor.start()
+    # Page-history searches run in their own thread, sharing the live tracker's request budget.
+    history = HistorySearcher(db, WikiClient(config.WIKI_DOMAIN, config.WIKI_LANG, config.CONTACT,
+                                             profile["api_per_minute"], share_limits_with=wiki))
+    history.start()
 
     logging.info("Dashboard: %s  (close this window or stop the program to stop tracking)", url)
     if open_browser:
         threading.Timer(1.5, webbrowser.open, [url]).start()
-    create_app(db, monitor, wiki, profile).run(host=config.HOST, port=config.PORT, debug=False,
-                                               use_reloader=False, threaded=True)
+    create_app(db, monitor, wiki, profile, history).run(host=config.HOST, port=config.PORT, debug=False,
+                                                        use_reloader=False, threaded=True)
 
 
 if __name__ == "__main__":

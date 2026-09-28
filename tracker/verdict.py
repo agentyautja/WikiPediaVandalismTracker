@@ -47,7 +47,8 @@ def community_evidence(community):
         strength = 0.9 if block.get("kind") == "vandalism" else 0.5
         evidence.append((strength, f"Editor blocked: {_short(block.get('reason')) or 'no reason given'}"))
     if community.get("hidden"):
-        evidence.append((0.85, "Hidden by Wikipedia admins (revision deleted)"))
+        why = _short(community.get("hidden_reason"))
+        evidence.append((0.85, f"Hidden by Wikipedia admins: {why}" if why else "Hidden by Wikipedia admins (revision deleted)"))
     deleted = community.get("deleted")
     if deleted:
         strength = 0.9 if deleted.get("kind") == "vandalism" else 0.4

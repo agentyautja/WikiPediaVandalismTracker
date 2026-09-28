@@ -1,7 +1,7 @@
 "use strict";
 
 // The server only sends confirmed vandalism that Wikipedia has already cleaned up.
-const VIEWS = [["all", "All"], ["favorites", "★ Favourites"]];
+const VIEWS = [["all", "All"], ["favorites", "★ Favourites"], ["history", "🔍 Page history"]];
 const STATUS_LABEL = {reverted: "Reverted", hidden: "Hidden by admins", deleted: "Page deleted"};
 const PAGE_SIZE = 50;
 const REFRESH_MS = 5000;
@@ -15,7 +15,8 @@ const fmt = (n) => Number(n || 0).toLocaleString();
 const plain = (wikitext) => String(wikitext || "").replace(/\[\[(?:[^|\]]*\|)?([^\]]*)\]\]/g, "$1");
 const short = (text, n) => (text.length > n ? `${text.slice(0, n - 1)}…` : text);
 
-const state = Object.assign({view: "all", category: "", q: "", sort: "newest"}, loadState());
+const state = Object.assign({view: "all", category: "", q: "", sort: "newest", historyId: null, depth: 500},
+  loadState());
 delete state.verdicts;   // left over from older versions
 if (!VIEWS.some(([key]) => key === state.view)) state.view = "all";
 let limit = PAGE_SIZE;
@@ -38,7 +39,12 @@ function ago(iso) {
   if (s < 60) return `${Math.round(s)}s ago`;
   if (s < 3600) return `${Math.round(s / 60)} min ago`;
   if (s < 86400) return `${Math.round(s / 3600)} h ago`;
-  return `${Math.round(s / 86400)} d ago`;
+  if (s < 30 * 86400) return `${Math.round(s / 86400)} d ago`;
+  return day(iso);   // old edits from a page-history search
+}
+
+function day(iso) {
+  return new Date(iso).toLocaleDateString(undefined, {day: "numeric", month: "short", year: "numeric"});
 }
 
 function until(iso) {
@@ -70,6 +76,10 @@ function renderControls() {
   ).join("");
   $("#search").value = state.q;
   $("#sort").value = state.sort;
+  const history = state.view === "history";
+  $("#feed-tools").hidden = history;
+  $("#feed-filters").hidden = history;
+  $("#history-panel").hidden = !history;
 }
 
 function renderCategories(counts, totalAll) {
@@ -131,6 +141,56 @@ function setPill(kind, text) {
   const pill = $("#status-pill");
   pill.className = `pill ${kind}`;
   pill.querySelector(".pill-text").textContent = text;
+}
+
+// ---------------------------------------------------------------- page history
+
+const RUNNING = ["queued", "running"];
+let historyError = null;   // e.g. "There's no page called …", shown until the next search
+
+function renderHistoryControls(data) {
+  const depth = $("#history-depth");
+  if (!depth.options.length) {
+    depth.innerHTML = data.depths.map((n) => `<option value="${n}">Last ${fmt(n)} edits</option>`).join("");
+  }
+  depth.value = String(state.depth);
+  $("#history-recent").innerHTML = data.searches.length ? `<span class="recent-label">Recent:</span>` +
+    data.searches.map((s) => {
+      const mark = RUNNING.includes(s.status) ? " …" : s.status === "error" ? " ⚠" : "";
+      return `<button class="fchip" data-search="${s.id}" aria-pressed="${s.id === state.historyId}">` +
+        `${esc(s.title || s.query)}${mark}</button>`;
+    }).join("") : "";
+}
+
+function renderHistoryStatus(search, total) {
+  const box = $("#history-status");
+  box.hidden = !search;
+  if (!search) return;
+  const name = search.title || search.query;
+  const bar = box.querySelector(".bar");
+  let text;
+  if (search.status === "error") {
+    text = `<b class="error">${esc(search.error || "The search failed.")}</b>`;
+  } else if (RUNNING.includes(search.status)) {
+    text = `<b>${esc(name)}</b> — ${esc(search.phase || "Starting")}…`;
+  } else {
+    const range = search.revisions ? ` (${day(search.oldest)} – ${day(search.newest)})` : "";
+    text = `<b>${esc(name)}</b>: <b>${fmt(total)}</b> confirmed vandal edit${total === 1 ? "" : "s"} ` +
+      `in the last ${fmt(search.revisions)} edits${range} · ${fmt(search.reverted)} of those edits were reverted`;
+  }
+  box.querySelector(".history-status-text").innerHTML = text;
+  bar.hidden = !RUNNING.includes(search.status) || !search.to_check;
+  const done = search.to_check ? Math.min(100, Math.round(100 * search.checked / search.to_check)) : 0;
+  bar.querySelector("span").style.width = `${done}%`;
+}
+
+async function startHistorySearch(page) {
+  const resp = await fetch("/api/history", {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({page, depth: state.depth}),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+  return data.id;
 }
 
 // ---------------------------------------------------------------- cards
@@ -230,13 +290,23 @@ function card(e, fresh) {
         <a class="btn primary" href="${esc(e.primary.url)}" target="_blank" rel="noopener">${esc(e.primary.label)} ↗</a>
         <a class="btn" href="${esc(e.links.diff)}" target="_blank" rel="noopener">Diff ↗</a>
         ${e.status !== "deleted" ? `<a class="btn" href="${esc(e.links.page)}" target="_blank" rel="noopener">Current page ↗</a>` : ""}
-        <button class="btn" data-action="recheck">↻ Re-check now</button>
+        ${e.source === "history" ? "" : `<button class="btn" data-action="recheck">↻ Re-check now</button>`}
         ${checkedHtml(e)}
       </div>
     </article>`;
 }
 
-function emptyHtml() {
+function emptyHtml(search) {
+  if (state.view === "history") {
+    if (!search) {
+      return `<div class="empty"><b>Search a page's history</b>Type a page name above, or paste a link to any Wikipedia page, to find the vandalism in its past.</div>`;
+    }
+    if (RUNNING.includes(search.status)) {
+      return `<div class="empty"><b>Searching…</b>Confirmed vandalism shows up here as soon as it's found.</div>`;
+    }
+    if (search.status === "error") return "";
+    return `<div class="empty"><b>No confirmed vandalism found</b>Nothing in the last ${fmt(search.revisions)} edits passed both checks. Try looking further back.</div>`;
+  }
   if (state.view === "favorites") {
     return `<div class="empty"><b>No favourites yet</b>Click the ☆ next to any vandalism to keep it here forever.</div>`;
   }
@@ -255,12 +325,12 @@ function cardSignature(e) {
     e.stage === "new", e.diff.hunks.length, e.primary.url]);
 }
 
-function renderList(data) {
+function renderList(data, search) {
   const list = $("#list");
   $("#more").hidden = data.items.length >= data.total;
   $("#count").textContent = data.total ? `Showing ${fmt(data.items.length)} of ${fmt(data.total)}` : "";
   if (!data.items.length) {
-    const html = emptyHtml();
+    const html = emptyHtml(search);
     if (lastSignature !== html) list.innerHTML = html;
     lastSignature = html;
     return;
@@ -309,19 +379,44 @@ function updateTimes() {
 async function refresh() {
   if (busy) return;
   busy = true;
+  let again = false;
   try {
-    const params = new URLSearchParams({view: state.view, sort: state.sort, limit});
-    if (state.category) params.set("category", state.category);
-    if (state.q) params.set("q", state.q);
-    const [s, data] = await Promise.all([getJSON("/api/status"), getJSON(`/api/edits?${params}`)]);
-    renderStatus(s);
-    renderCategories(data.category_counts, data.total_all);
-    renderList(data);
+    if (state.view === "history") {
+      again = await refreshHistory();
+    } else {
+      const params = new URLSearchParams({view: state.view, sort: state.sort, limit});
+      if (state.category) params.set("category", state.category);
+      if (state.q) params.set("q", state.q);
+      const [s, data] = await Promise.all([getJSON("/api/status"), getJSON(`/api/edits?${params}`)]);
+      renderStatus(s);
+      renderCategories(data.category_counts, data.total_all);
+      renderList(data);
+    }
   } catch (err) {
     setPill("bad", "Can't reach the tracker — is main.py still running?");
   } finally {
     busy = false;
   }
+  if (again) setTimeout(refresh, 1500);   // a search is running: follow it closely
+}
+
+async function refreshHistory() {
+  const results = state.historyId
+    ? fetch(`/api/history/${state.historyId}?limit=${limit}`, {cache: "no-store"}) : Promise.resolve(null);
+  const [s, recent, resp] = await Promise.all([getJSON("/api/status"), getJSON("/api/history"), results]);
+  renderStatus(s);
+  let data = {items: [], total: 0, search: null};
+  if (resp && resp.status === 404) {
+    state.historyId = null;   // that search was cleaned up
+    saveState();
+  } else if (resp) {
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    data = await resp.json();
+  }
+  renderHistoryControls(recent);
+  renderHistoryStatus(historyError ? {status: "error", error: historyError} : data.search, data.total);
+  renderList(data, data.search);
+  return Boolean(data.search && RUNNING.includes(data.search.status));
 }
 
 document.addEventListener("click", async (ev) => {
@@ -333,6 +428,12 @@ document.addEventListener("click", async (ev) => {
   const categoryChip = ev.target.closest("[data-category]");
   if (categoryChip) {
     state.category = categoryChip.dataset.category;
+    return changed();
+  }
+  const searchChip = ev.target.closest("[data-search]");
+  if (searchChip) {
+    state.historyId = Number(searchChip.dataset.search);
+    historyError = null;
     return changed();
   }
   const action = ev.target.closest("[data-action]");
@@ -368,6 +469,25 @@ $("#search").addEventListener("input", (ev) => {
   searchTimer = setTimeout(() => { state.q = ev.target.value.trim(); changed(); }, 300);
 });
 $("#sort").addEventListener("change", (ev) => { state.sort = ev.target.value; changed(); });
+$("#history-depth").addEventListener("change", (ev) => { state.depth = Number(ev.target.value); saveState(); });
+$("#history-form").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const input = $("#history-page");
+  const button = ev.target.querySelector("button");
+  button.disabled = true;
+  historyError = null;
+  try {
+    state.historyId = await startHistorySearch(input.value);
+    input.value = "";
+    changed();
+  } catch (err) {
+    historyError = err.message;
+    renderHistoryStatus({status: "error", error: historyError}, 0);
+  } finally {
+    button.disabled = false;
+  }
+});
+$("#history-page").addEventListener("input", () => { historyError = null; });
 $("#more").addEventListener("click", () => { limit += PAGE_SIZE; lastSignature = ""; refresh(); });
 
 renderControls();

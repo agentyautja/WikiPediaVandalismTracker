@@ -5,7 +5,8 @@ import re
 REVERT_TAGS = {"mw-rollback", "mw-undo", "mw-manual-revert"}
 ANTIVANDAL_TAG_PREFIXES = ("mw-rollback", "huggle", "twinkle", "antivandal", "redwarn", "ultraviolet", "swviewer",
                            "wikishield")
-ANTIVANDAL_BOTS = re.compile(r"^cluebot", re.IGNORECASE)
+# ClueBot NG today; the others patrolled older history (a page-history search goes back years).
+ANTIVANDAL_BOTS = re.compile(r"^(?:cluebot|voabot|antivandalbot|martinbot|tawkerbot)", re.IGNORECASE)
 
 GOODFAITH_SUMMARY = re.compile(r"good[\s-]?faith|\bagf\b|not vandalism", re.IGNORECASE)
 VANDALISM_SUMMARY = re.compile(

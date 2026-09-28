@@ -60,12 +60,14 @@
         cleaned up.</li>
       <li><b>Links.</b> Each one links to the vandalized version (a permanent link to the page exactly as the vandal
         left it), plus the diff.</li>
+      <li><b>Page history.</b> Give it a page and it reads that page's latest edits, picks out the ones Wikipedia
+        reverted (or admins hid), and runs those through the same two checks.</li>
     </ol>
   </details>
 
   <nav class="toolbar">
     <div class="tabs" id="views" role="tablist"></div>
-    <div class="tools">
+    <div class="tools" id="feed-tools">
       <input type="search" id="search" placeholder="Search title, user or text…" aria-label="Search">
       <select id="sort" aria-label="Sort">
         <option value="newest">Newest first</option>
@@ -74,9 +76,24 @@
     </div>
   </nav>
 
-  <div class="filters">
+  <div class="filters" id="feed-filters">
     <div class="chiprow" id="category-chips" aria-label="Category"></div>
   </div>
+
+  <section id="history-panel" class="history" hidden>
+    <form id="history-form" class="history-form">
+      <input id="history-page" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Wikipedia page name or link, e.g. Colorado" aria-label="Wikipedia page name or link">
+      <select id="history-depth" aria-label="How many edits to look at"></select>
+      <button class="btn primary" type="submit">Search history</button>
+    </form>
+    <p class="history-hint">Finds the vandalism in a page's past: the edits Wikipedia reverted or hid, double-checked.</p>
+    <div id="history-recent" class="chiprow" aria-label="Recent searches"></div>
+    <div id="history-status" class="history-status" hidden>
+      <div class="history-status-text"></div>
+      <div class="bar" hidden><span></span></div>
+    </div>
+  </section>
 
   <main id="list" aria-live="polite"></main>
   <div class="footer-row">

@@ -32,6 +32,28 @@ def _ores(rc):
     return scores["goodfaith"].get("false"), (scores.get("damaging") or {}).get("true")
 
 
+def analyze_content(edit, revisions, missing):
+    """Check 2, part 1: diff the edit against its parent and run the content rules.
+
+    `revisions`/`missing` come from WikiClient.revisions(..., content=True). Returns database fields.
+    """
+    new = revisions.get(edit["revid"])
+    old = revisions.get(edit["parentid"]) if edit["parentid"] else None
+    if new is None or new["text"] is None:
+        diff = {"hunks": [], "unavailable": "deleted" if edit["revid"] in missing else "hidden"}
+        added = removed = old_text = context = ""
+    else:
+        old_text = (old or {}).get("text") or ""
+        result = diffing.diff_texts(old_text, new["text"])
+        diff = {"hunks": result.hunks, "added_sample": result.added_sample,
+                "removed_sample": result.removed_sample, "added_chars": len(result.added),
+                "removed_chars": len(result.removed)}
+        added, removed, context = result.added, result.removed, result.new_context
+    findings = heuristics.analyze(added, removed, old_text, edit, context)
+    return {"diff": diff, "findings": findings, "content_score": heuristics.score(findings),
+            "parent_sha1": (old or {}).get("sha1")}
+
+
 def _still_there(diff, text):
     """Is the vandalism still in the page text? True, False or None (can't tell)."""
     if text is None:
@@ -152,27 +174,14 @@ class Monitor(threading.Thread):
                 self._analyze(edit, revisions, missing)
 
     def _analyze(self, edit, revisions, missing):
-        new = revisions.get(edit["revid"])
-        old = revisions.get(edit["parentid"]) if edit["parentid"] else None
-        if new is None or new["text"] is None:
-            diff = {"hunks": [], "unavailable": "deleted" if edit["revid"] in missing else "hidden"}
-            added = removed = old_text = context = ""
-        else:
-            old_text = (old or {}).get("text") or ""
-            result = diffing.diff_texts(old_text, new["text"])
-            diff = {"hunks": result.hunks, "added_sample": result.added_sample,
-                    "removed_sample": result.removed_sample, "added_chars": len(result.added),
-                    "removed_chars": len(result.removed)}
-            added, removed, context = result.added, result.removed, result.new_context
-        findings = heuristics.analyze(added, removed, old_text, edit, context)
-        fields = {"diff": diff, "findings": findings, "content_score": heuristics.score(findings),
-                  "revert_risk": self.wiki.revert_risk(edit["revid"], config.REVERT_RISK_MODEL)}
+        fields = analyze_content(edit, revisions, missing)
+        fields["revert_risk"] = self.wiki.revert_risk(edit["revid"], config.REVERT_RISK_MODEL)
         # A first verdict right away (content + model); how Wikipedia reacts is added at the re-checks.
         result, confidence, reasons = verdict.decide({**edit, **fields}, final=False)
         if result in ("confirmed", "likely"):
             log.info("Check 2: %s vandalism - %s (%s)", result.upper(), edit["title"], reasons[0])
         self.db.update_edit(edit["revid"], **fields, verdict=result, confidence=confidence, reasons=reasons,
-                            parent_sha1=(old or {}).get("sha1"), stage="tracking", next_check=iso(utcnow()))
+                            stage="tracking", next_check=iso(utcnow()))
 
     # -- check 2, part 2: how did Wikipedia react? (re-checked on a schedule) ------
 

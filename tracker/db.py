@@ -38,7 +38,8 @@ CREATE TABLE IF NOT EXISTS edits (
     next_check    TEXT,
     last_checked  TEXT,
     check_count   INTEGER DEFAULT 0,
-    first_seen    TEXT
+    first_seen    TEXT,
+    source        TEXT DEFAULT 'live'       -- live (RecentChanges) or history (found by a page-history search)
 );
 CREATE INDEX IF NOT EXISTS edits_by_time ON edits (timestamp);
 CREATE INDEX IF NOT EXISTS edits_by_stage ON edits (stage, next_check);
@@ -63,6 +64,25 @@ CREATE TABLE IF NOT EXISTS page_topics (
 );
 
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
+
+CREATE TABLE IF NOT EXISTS history_searches (  -- "search this page's history" requests
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    query       TEXT,             -- what was typed: a title or a link
+    title       TEXT,
+    pageid      INTEGER,
+    depth       INTEGER,          -- how many of the latest edits to look at
+    status      TEXT,             -- queued, running, done, error
+    phase       TEXT,
+    revisions   INTEGER DEFAULT 0,
+    oldest      TEXT,
+    newest      TEXT,
+    reverted    INTEGER DEFAULT 0,
+    to_check    INTEGER DEFAULT 0,
+    checked     INTEGER DEFAULT 0,
+    error       TEXT,
+    created_at  TEXT,
+    finished_at TEXT
+);
 """
 
 JSON_FIELDS = {"tags", "draft_scores", "diff", "findings", "community", "reasons", "categories"}
@@ -93,6 +113,9 @@ class Database:
         with self._lock:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(SCHEMA)
+            columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(edits)")}
+            if "source" not in columns:   # a database from before the page-history search
+                self._conn.execute("ALTER TABLE edits ADD COLUMN source TEXT DEFAULT 'live'")
 
     def _query(self, sql, params=()):
         with self._lock:
@@ -120,6 +143,15 @@ class Database:
 
     def edit_exists(self, revid):
         return bool(self._query("SELECT 1 FROM edits WHERE revid = ?", (revid,)))
+
+    def existing_revids(self, revids):
+        revids = list(revids)
+        found = set()
+        for i in range(0, len(revids), 500):
+            chunk = revids[i:i + 500]
+            found |= {r["revid"] for r in self._query(
+                f"SELECT revid FROM edits WHERE revid IN ({', '.join('?' for _ in chunk)})", chunk)}
+        return found
 
     def insert_edit(self, edit):
         edit = {"first_seen": _now(), **edit}
@@ -193,8 +225,14 @@ class Database:
     # -- queries for the web page -------------------------------------------------
 
     def list_edits(self, verdicts=(), statuses=(), category=None, favorites=False, query="", sort="newest",
-                   limit=50, offset=0):
+                   limit=50, offset=0, source=None, pageid=None):
         where, params = [], []
+        if source:
+            where.append("source = ?")
+            params.append(source)
+        if pageid:
+            where.append("pageid = ?")
+            params.append(pageid)
         if verdicts:
             where.append(f"verdict IN ({', '.join('?' for _ in verdicts)})")
             params += list(verdicts)
@@ -228,8 +266,9 @@ class Database:
         verdicts = {r["verdict"]: r["n"] for r in self._query(
             "SELECT verdict, COUNT(*) AS n FROM edits GROUP BY verdict")}
         shown = self._query(
-            f"SELECT COUNT(*) AS n FROM edits WHERE verdict IN ({', '.join('?' for _ in shown_verdicts)}) "
-            f"AND status IN ({', '.join('?' for _ in shown_statuses)})", [*shown_verdicts, *shown_statuses])[0]["n"]
+            f"SELECT COUNT(*) AS n FROM edits WHERE source = 'live' AND verdict IN "
+            f"({', '.join('?' for _ in shown_verdicts)}) AND status IN ({', '.join('?' for _ in shown_statuses)})",
+            [*shown_verdicts, *shown_statuses])[0]["n"]
         return {
             "scanned": int(self.get_state("scanned_total", 0)),
             "candidates": int(self.get_state("candidates_total", 0)),
@@ -243,6 +282,38 @@ class Database:
     def cleanup(self, keep_days):
         cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
         day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-        self._run("DELETE FROM edits WHERE favorite = 0 AND timestamp < ?", (cutoff,))
-        self._run("DELETE FROM edits WHERE favorite = 0 AND verdict = 'rejected' AND timestamp < ?", (day_ago,))
+        self._run("DELETE FROM edits WHERE favorite = 0 AND source = 'live' AND timestamp < ?", (cutoff,))
+        self._run("DELETE FROM edits WHERE favorite = 0 AND source = 'live' AND verdict = 'rejected' "
+                  "AND timestamp < ?", (day_ago,))
+        # History finds are old edits by nature: forget them by when they were found instead.
+        self._run("DELETE FROM edits WHERE favorite = 0 AND source = 'history' AND first_seen < ?", (cutoff,))
+        self._run("DELETE FROM history_searches WHERE created_at < ?", (cutoff,))
         self._run("DELETE FROM reverts WHERE timestamp < ?", (day_ago,))
+
+    # -- page-history searches ---------------------------------------------------------
+
+    def create_search(self, query, depth):
+        with self._lock:
+            return self._conn.execute(
+                "INSERT INTO history_searches (query, depth, status, phase, created_at) VALUES (?, ?, 'queued', ?, ?)",
+                (query, depth, "Waiting to start", _now())).lastrowid
+
+    def update_search(self, search_id, **fields):
+        if fields:
+            assignments = ", ".join(f"{k} = ?" for k in fields)
+            self._run(f"UPDATE history_searches SET {assignments} WHERE id = ?", [*fields.values(), search_id])
+
+    def get_search(self, search_id):
+        rows = self._query("SELECT * FROM history_searches WHERE id = ?", (search_id,))
+        return dict(rows[0]) if rows else None
+
+    def recent_searches(self, limit):
+        return [dict(r) for r in self._query("SELECT * FROM history_searches ORDER BY id DESC LIMIT ?", (limit,))]
+
+    def unfinished_searches(self):
+        return [r["id"] for r in self._query(
+            "SELECT id FROM history_searches WHERE status IN ('queued', 'running') ORDER BY id")]
+
+    def forget_older_searches(self, pageid, keep):
+        """One search per page in the 'recent searches' list: the newest one."""
+        self._run("DELETE FROM history_searches WHERE pageid = ? AND id != ?", (pageid, keep))

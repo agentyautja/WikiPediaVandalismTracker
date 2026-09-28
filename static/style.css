@@ -146,6 +146,25 @@ input[type="search"] { flex: 1 1 200px; max-width: 320px; min-width: 0; }
 .fchip[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); font-weight: 600; }
 .fchip .n { color: var(--muted); margin-left: 4px; font-weight: 400; }
 
+/* page-history search */
+.history {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px;
+  margin: 12px 0 16px; box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 10px;
+}
+.history-form { display: flex; gap: 8px; flex-wrap: wrap; }
+.history-form input {
+  flex: 1 1 260px; min-width: 0; font: inherit; font-size: 15px; color: var(--text); background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px;
+}
+.history-form input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.history-form .btn { padding: 8px 14px; font-size: 14px; }
+.history-hint { margin: 0; color: var(--muted); font-size: 13px; }
+.recent-label { color: var(--muted); font-size: 13px; align-self: center; margin-right: 2px; }
+.history-status { font-size: 14px; display: flex; flex-direction: column; gap: 6px; }
+.history-status .error { color: var(--red); }
+.bar { height: 6px; background: var(--gray-soft); border-radius: 999px; overflow: hidden; }
+.bar span { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 999px; transition: width .4s; }
+
 /* cards */
 #list { display: flex; flex-direction: column; gap: 12px; }
 .card {

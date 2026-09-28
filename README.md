@@ -74,6 +74,25 @@ Verdicts:
 The dashboard only shows **Confirmed** vandalism that Wikipedia has **already cleaned up** (reverted, hidden or
 deleted). Everything else is tracked in the background and appears once it's confirmed and cleaned up.
 
+## Page history search
+
+The **🔍 Page history** tab looks for vandalism in one page's past. Type a page name, or paste any link to it (an
+article, its history, or a diff), choose how far back to look (the last 500 to 5,000 edits) and click
+*Search history*.
+
+The search reads the page's history, picks out the edits Wikipedia **reverted** (a later edit restored the exact
+earlier text, or MediaWiki tagged the edit as reverted) or that admins **hid**, and runs those through the same two
+checks as live edits:
+
+- Reverts that call the edit a *good-faith* mistake, self-reverts and bot edits are skipped.
+- Revisions hidden for copyright or privacy reasons are skipped too; only the vandalism-type reasons count.
+- **Check 1:** Wikipedia's ORES good-faith model scores each remaining edit.
+- **Check 2:** the edit's text, the revert-risk model, how it was reverted (by ClueBot NG, with an anti-vandalism
+  tool, "rvv"…) and whether the editor is blocked.
+
+Only confirmed vandalism is listed. A 500-edit search takes about 1 to 3 minutes. Searching the same page again only
+checks the edits it hasn't seen yet, and your recent searches stay listed so you can reopen them.
+
 ## Links
 
 - The main button opens the *vandalized version*: a permanent link to the page exactly as the vandal left it.
@@ -81,7 +100,7 @@ deleted). Everything else is tracked in the background and appears once it's con
 
 ## Dashboard
 
-- Tabs: *All* and *★ Favourites*.
+- Tabs: *All*, *★ Favourites* (live finds and page-history finds) and *🔍 Page history*.
 - Category chips (Politics, Science, Sports, Music, Film & TV, Geography, People…), search and sort.
 - Click ☆ to favourite an edit. Favourites are kept forever; other edits are forgotten after `KEEP_DAYS`.
 - *↻ Re-check now* runs check 2 again straight away.
@@ -108,6 +127,7 @@ icon.ico           the .exe's icon
 tracker/
   wiki.py          Wikipedia API + Lift Wing client (rate limiting, retries)
   monitor.py       the background loop: scan → check 1 → check 2 → re-checks
+  history.py       page-history search: find reverted edits, then check 1 + check 2
   diffing.py       word-level diff of two revisions
   heuristics.py    "does the text look like vandalism?" rules
   community.py     reading reverts, blocks and deletions

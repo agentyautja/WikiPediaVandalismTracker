@@ -7,6 +7,7 @@ from urllib.parse import quote
 from flask import Flask, abort, jsonify, request, send_from_directory
 
 import config
+from .history import DEPTHS, SearchError
 from .topics import ALL_CATEGORIES
 
 # Inside the .exe, bundled files are unpacked to sys._MEIPASS.
@@ -48,7 +49,7 @@ def present(edit):
         **{key: edit[key] for key in (
             "revid", "title", "user", "timestamp", "comment", "edit_type", "badfaith", "damaging", "revert_risk",
             "content_score", "findings", "community", "status", "verdict", "confidence", "reasons", "categories",
-            "check_count", "last_checked", "next_check", "stage")},
+            "check_count", "last_checked", "next_check", "stage", "source")},
         "favorite": bool(edit["favorite"]),
         "size_change": (edit["newlen"] or 0) - (edit["oldlen"] or 0),
         "diff": {"hunks": diff.get("hunks", []), "unavailable": diff.get("unavailable")},
@@ -57,7 +58,7 @@ def present(edit):
     }
 
 
-def create_app(db, monitor, wiki, profile):
+def create_app(db, monitor, wiki, profile, history):
     app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="/static")
 
     @app.get("/")
@@ -67,10 +68,12 @@ def create_app(db, monitor, wiki, profile):
     @app.get("/api/edits")
     def edits():
         args = request.args
+        favorites = args.get("view") == "favorites"
         result = db.list_edits(
             verdicts=SHOWN_VERDICTS,
             statuses=SHOWN_STATUSES,
-            favorites=args.get("view") == "favorites",
+            source=None if favorites else "live",   # page-history finds have their own tab
+            favorites=favorites,
             category=args.get("category") or None,
             query=args.get("q", "").strip(),
             sort=args.get("sort", "newest"),
@@ -95,6 +98,32 @@ def create_app(db, monitor, wiki, profile):
             "categories": ALL_CATEGORIES,
             "wiki": config.WIKI_DOMAIN,
         })
+
+    @app.post("/api/history")
+    def start_history_search():
+        body = request.get_json(silent=True) or {}
+        try:
+            search_id = history.request(str(body.get("page", "")), int(body.get("depth") or DEPTHS[0]))
+        except SearchError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except (TypeError, ValueError):
+            return jsonify({"error": "That's not a valid number of edits."}), 400
+        return jsonify({"id": search_id})
+
+    @app.get("/api/history")
+    def history_searches():
+        return jsonify({"searches": db.recent_searches(10), "depths": DEPTHS})
+
+    @app.get("/api/history/<int:search_id>")
+    def history_search(search_id):
+        search = db.get_search(search_id)
+        if search is None:
+            abort(404)
+        result = {"items": [], "total": 0}
+        if search["pageid"]:   # every confirmed, cleaned-up vandal edit we know on this page
+            result = db.list_edits(verdicts=SHOWN_VERDICTS, statuses=SHOWN_STATUSES, pageid=search["pageid"],
+                                   limit=min(request.args.get("limit", 50, type=int), 500))
+        return jsonify({"search": search, "items": [present(e) for e in result["items"]], "total": result["total"]})
 
     @app.post("/api/edits/<int:revid>/favorite")
     def favorite(revid):

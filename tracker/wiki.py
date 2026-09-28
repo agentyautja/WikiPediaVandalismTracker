@@ -71,7 +71,9 @@ def _chunks(items, size):
 
 
 class WikiClient:
-    def __init__(self, domain, lang, contact, api_per_minute):
+    """One client per thread. Pass `share_limits_with` so several clients stay within one request budget."""
+
+    def __init__(self, domain, lang, contact, api_per_minute, share_limits_with=None):
         self.domain = domain
         self.lang = lang
         self.wiki_db = f"{lang}wiki"
@@ -84,6 +86,9 @@ class WikiClient:
         })
         self.api_limiter = RateLimiter(api_per_minute)
         self.liftwing_limiter = RateLimiter(300)   # Lift Wing allows 15/s; we need far less
+        if share_limits_with:
+            self.api_limiter = share_limits_with.api_limiter
+            self.liftwing_limiter = share_limits_with.liftwing_limiter
         self.last_error = None
 
     # -- low level ------------------------------------------------------------
@@ -190,6 +195,40 @@ class WikiClient:
                         }
         return found, missing
 
+    def page_info(self, title=None, revid=None):
+        """{"pageid", "title", "ns"} for a page name (redirects followed) or a revision id; None if missing."""
+        params = dict(action="query", prop="info", redirects="1")
+        if revid:
+            params["revids"] = revid
+        else:
+            params["titles"] = title
+        pages = self.api(**params).get("query", {}).get("pages", [])
+        if not pages or pages[0].get("missing") or pages[0].get("invalid") or "pageid" not in pages[0]:
+            return None
+        return {"pageid": pages[0]["pageid"], "title": pages[0]["title"], "ns": pages[0].get("ns", 0)}
+
+    def page_history(self, pageid, limit):
+        """The latest `limit` revisions of a page (metadata only, newest first), 500 per request."""
+        revisions = []
+        for data in self.api_pages(action="query", prop="revisions", pageids=pageid, rvlimit="max",
+                                   rvprop="ids|timestamp|user|comment|tags|sha1|size"):
+            for page in data.get("query", {}).get("pages", []):
+                revisions.extend(page.get("revisions", []))
+            if len(revisions) >= limit:
+                break
+        return revisions[:limit]
+
+    def revision_deletions(self, title):
+        """{revid: reason} for revisions of a page that admins hid (from the revision-deletion log)."""
+        reasons = {}
+        for data in self.api_pages(action="query", list="logevents", letype="delete", leaction="delete/revision",
+                                   letitle=title, lelimit="max", leprop="ids|comment|details"):
+            for event in data.get("query", {}).get("logevents", []):
+                for revid in (event.get("params") or {}).get("ids") or []:
+                    if str(revid).isdigit():
+                        reasons.setdefault(int(revid), event.get("comment", ""))   # newest reason wins
+        return reasons
+
     def history_after(self, pageid, revid, limit=25):
         """The revision `revid` and the ones that followed it on the same page."""
         data = self.api(action="query", prop="revisions", pageids=pageid, rvstartid=revid, rvdir="newer",
@@ -251,15 +290,17 @@ class WikiClient:
         except (TypeError, KeyError, ValueError):
             return None
 
+    def ores_probability(self, revid, model, outcome):
+        """One ORES score straight from Lift Wing, e.g. ("goodfaith", "false") = P(bad faith). None if unavailable."""
+        data = self.liftwing(f"{self.wiki_db}-{model}", {"rev_id": revid})
+        try:
+            return float(data[self.wiki_db]["scores"][str(revid)][model]["score"]["probability"][outcome])
+        except (TypeError, KeyError, ValueError):
+            return None
+
     def ores_scores(self, revid):
-        """(P(bad faith), P(damaging)) straight from the ORES models, for edits RecentChanges hasn't scored."""
-        def probability(model, outcome):
-            data = self.liftwing(f"{self.wiki_db}-{model}", {"rev_id": revid})
-            try:
-                return float(data[self.wiki_db]["scores"][str(revid)][model]["score"]["probability"][outcome])
-            except (TypeError, KeyError, ValueError):
-                return None
-        return probability("goodfaith", "false"), probability("damaging", "true")
+        """(P(bad faith), P(damaging)), for edits RecentChanges hasn't scored."""
+        return self.ores_probability(revid, "goodfaith", "false"), self.ores_probability(revid, "damaging", "true")
 
     def article_topics(self, title):
         """[(topic, score)] from the article-topic model, e.g. ("History_and_Society.Politics_and_government", 0.9)."""
