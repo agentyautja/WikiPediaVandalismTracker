@@ -24,7 +24,9 @@ log = logging.getLogger(__name__)
 DEPTHS = [500, 1000, 2500, 5000]   # how many of the latest edits a search can look at
 REVERT_WINDOW = 15                 # like MediaWiki, a revert can undo at most this many edits
 BOT_NAME = re.compile(r"bot\b", re.IGNORECASE)
-WORKERS = 3                        # parallel Lift Wing requests (Wikimedia asks for 3 or fewer)
+# Parallel Lift Wing requests. Scoring an old edit takes a few seconds, so this is what sets the speed;
+# 8 at a time stays far below Lift Wing's limit of 15 requests per second.
+WORKERS = 8
 # Admins also hide revisions that aren't vandalism: copyright violations (RD1), private info (RD4),
 # housekeeping (RD5/RD6). Those are skipped.
 NOT_VANDAL_HIDING = re.compile(r"\bRD ?[1456]\b|copyright|copyvio|personal information|privacy", re.IGNORECASE)
@@ -154,46 +156,54 @@ class HistorySearcher(threading.Thread):
         update(revisions=len(history), oldest=history[0]["timestamp"], newest=history[-1]["timestamp"],
                reverted=len(reverters), phase="Looking at the reverted edits")
 
-        candidates = self._candidates(history, reverters, hidden)
-        update(to_check=len(candidates), phase=f"Check 1: bad-faith scores for {len(candidates)} reverted edits")
-        with ThreadPoolExecutor(WORKERS) as pool:
-            scores = list(pool.map(lambda c: self.wiki.ores_probability(c[0]["revid"], "goodfaith", "false"),
-                                   candidates))
+        candidates = self._candidates(history, reverters, hidden)[::-1]   # newest first: those matter most
+        update(to_check=len(candidates), phase=f"Checking {len(candidates)} reverted edits")
+        # Edits from the last ~30 days still have their ORES score in RecentChanges; only score the rest.
+        stored = (self._safe(lambda: self.wiki.recent_badfaith_scores(page["title"])) or {}) if candidates else {}
+
+        def badfaith(candidate):
+            revid = candidate[0]["revid"]
+            if stored.get(revid) is not None:
+                return stored[revid]
+            return self.wiki.ores_probability(revid, "goodfaith", "false")
 
         by_id = {r["revid"]: r for r in history}
-        categories = self._categories(page["title"])
-        passed, checked = [], 0
-        for (rev, info), badfaith in zip(candidates, scores):
-            row = self._row(page, rev, by_id.get(rev.get("parentid")), info, badfaith, categories)
-            if badfaith is not None and badfaith < config.BADFAITH_THRESHOLD:
-                row.update(verdict="rejected", confidence=0.0, reasons=[
-                    f"Check 1: ORES rates it only {badfaith:.0%} likely to be bad faith"])
-                self.db.insert_edit(row)   # remembered, so searching again doesn't redo it
-                checked += 1
-            else:
-                passed.append(row)
-        update(checked=checked, phase=f"Check 2: {len(passed)} edits passed check 1")
-
-        users = {row["user"] for row in passed if row["user"] != "(hidden)"}
-        blocks = self._safe(lambda: self.wiki.blocks(users)) if users else {}
-        for batch in _chunks(passed, 10):
-            revids = [row["revid"] for row in batch] + [row["parentid"] for row in batch if row["parentid"]]
-            revisions, missing = self.wiki.revisions(revids, content=True)
-            with ThreadPoolExecutor(WORKERS) as pool:
-                risks = list(pool.map(lambda row: self.wiki.revert_risk(row["revid"], config.REVERT_RISK_MODEL),
-                                      batch))
-            for row, risk in zip(batch, risks):
-                block = (blocks or {}).get(row["user"])
-                if block:
-                    row["community"]["block"] = {**block, "kind": community.classify_block(block.get("reason"))}
-                row.update(analyze_content(row, revisions, missing), revert_risk=risk)
-                result, confidence, reasons = verdict.decide(row, final=True)
-                row.update(verdict=result, confidence=confidence, reasons=reasons)
-                self.db.insert_edit(row)
-                checked += 1
-            update(checked=checked, phase=f"Check 2: {checked} of {len(candidates)} checked")
+        categories = self._categories(page["title"]) if candidates else None
+        checked = 0
+        # Small batches through both checks, so confirmed vandalism shows up while the search is still running.
+        with ThreadPoolExecutor(WORKERS) as pool:
+            for batch in _chunks(candidates, 2 * WORKERS):
+                passed = []
+                for (rev, info), score in zip(batch, pool.map(badfaith, batch)):   # check 1
+                    row = self._row(page, rev, by_id.get(rev.get("parentid")), info, score, categories)
+                    if score is not None and score < config.BADFAITH_THRESHOLD:
+                        row.update(verdict="rejected", confidence=0.0, reasons=[
+                            f"Check 1: ORES rates it only {score:.0%} likely to be bad faith"])
+                        self.db.insert_edit(row)   # remembered, so searching again doesn't redo it
+                    else:
+                        passed.append(row)
+                if passed:
+                    self._check2(passed, pool)
+                checked += len(batch)
+                update(checked=checked, phase=f"Checked {checked} of {len(candidates)} reverted edits")
         update(status="done", phase="Done", finished_at=_now())
         log.info("History search done: %s", page["title"])
+
+    def _check2(self, rows, pool):
+        """Check 2 for edits that passed check 1: content, revert-risk model, blocks; then store the verdict."""
+        users = {row["user"] for row in rows if row["user"] != "(hidden)"}
+        blocks = (self._safe(lambda: self.wiki.blocks(users)) if users else None) or {}
+        revids = [row["revid"] for row in rows] + [row["parentid"] for row in rows if row["parentid"]]
+        revisions, missing = self.wiki.revisions(revids, content=True)
+        risks = pool.map(lambda row: self.wiki.revert_risk(row["revid"], config.REVERT_RISK_MODEL), rows)
+        for row, risk in zip(rows, risks):
+            block = blocks.get(row["user"])
+            if block:
+                row["community"]["block"] = {**block, "kind": community.classify_block(block.get("reason"))}
+            row.update(analyze_content(row, revisions, missing), revert_risk=risk)
+            result, confidence, reasons = verdict.decide(row, final=True)
+            row.update(verdict=result, confidence=confidence, reasons=reasons)
+            self.db.insert_edit(row)
 
     def _candidates(self, history, reverters, hidden):
         """(revision, community info) for every reverted or hidden edit that still needs checking.

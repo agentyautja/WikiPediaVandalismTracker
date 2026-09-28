@@ -90,8 +90,10 @@ checks as live edits:
 - **Check 2:** the edit's text, the revert-risk model, how it was reverted (by ClueBot NG, with an anti-vandalism
   tool, "rvv"…) and whether the editor is blocked.
 
-Only confirmed vandalism is listed. A 500-edit search takes about 1 to 3 minutes. Searching the same page again only
-checks the edits it hasn't seen yet, and your recent searches stay listed so you can reopen them.
+Only confirmed vandalism is listed, newest first, and results appear while the search runs (usually the first one
+within about 15 seconds). A full 500-edit search takes 1 to 3 minutes, almost all of it waiting for Wikimedia's ORES
+model to score old edits; edits from the last 30 days reuse the scores Wikipedia already stored. Searching the same
+page again only checks the edits it hasn't seen yet, and your recent searches stay listed so you can reopen them.
 
 ## Links
 

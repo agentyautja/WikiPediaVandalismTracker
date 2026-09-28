@@ -218,6 +218,20 @@ class WikiClient:
                 break
         return revisions[:limit]
 
+    def recent_badfaith_scores(self, title):
+        """{revid: P(bad faith)} for a page's edits that RecentChanges still has (about the last 30 days).
+
+        These ORES scores are already stored, so they're far quicker than asking the model again.
+        """
+        scores = {}
+        for data in self.api_pages(action="query", list="recentchanges", rctitle=title, rctype="edit|new",
+                                   rcprop="ids|oresscores", rclimit="max"):
+            for rc in data.get("query", {}).get("recentchanges", []):
+                ores = rc.get("oresscores")
+                if isinstance(ores, dict) and "goodfaith" in ores:
+                    scores[rc["revid"]] = ores["goodfaith"].get("false")
+        return scores
+
     def revision_deletions(self, title):
         """{revid: reason} for revisions of a page that admins hid (from the revision-deletion log)."""
         reasons = {}
