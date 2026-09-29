@@ -65,6 +65,12 @@ CREATE TABLE IF NOT EXISTS page_topics (
 
 CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT);
 
+CREATE TABLE IF NOT EXISTS watchlist (         -- pages the user wants to keep an eye on
+    pageid   INTEGER PRIMARY KEY,
+    title    TEXT,
+    added_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS history_searches (  -- "search this page's history" requests
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     query       TEXT,             -- what was typed: a title or a link
@@ -86,6 +92,8 @@ CREATE TABLE IF NOT EXISTS history_searches (  -- "search this page's history" r
 """
 
 JSON_FIELDS = {"tags", "draft_scores", "diff", "findings", "community", "reasons", "categories"}
+# Seconds between an edit and the revert that undid it (NULL when unknown, e.g. hidden or deleted).
+REVERT_SECONDS = "ROUND((julianday(json_extract(community, '$.revert.timestamp')) - julianday(timestamp)) * 86400)"
 
 
 def _now():
@@ -225,14 +233,26 @@ class Database:
     # -- queries for the web page -------------------------------------------------
 
     def list_edits(self, verdicts=(), statuses=(), category=None, favorites=False, query="", sort="newest",
-                   limit=50, offset=0, source=None, pageid=None):
+                   limit=50, offset=0, source=None, pageid=None, user=None, watched=False,
+                   revert_min=None, revert_max=None):
         where, params = [], []
+        if revert_min is not None:
+            where.append(f"{REVERT_SECONDS} >= ?")
+            params.append(revert_min)
+        if revert_max is not None:
+            where.append(f"{REVERT_SECONDS} < ?")
+            params.append(revert_max)
         if source:
             where.append("source = ?")
             params.append(source)
         if pageid:
             where.append("pageid = ?")
             params.append(pageid)
+        if user:
+            where.append("user = ?")
+            params.append(user)
+        if watched:
+            where.append("pageid IN (SELECT pageid FROM watchlist)")
         if verdicts:
             where.append(f"verdict IN ({', '.join('?' for _ in verdicts)})")
             params += list(verdicts)
@@ -255,7 +275,11 @@ class Database:
         if category:
             base += " AND categories LIKE ?"
             params.append(f'%"{category}"%')
-        order = "confidence DESC, timestamp DESC" if sort == "confidence" else "timestamp DESC"
+        order = {
+            "confidence": "confidence DESC, timestamp DESC",
+            "slowest": f"{REVERT_SECONDS} IS NULL, {REVERT_SECONDS} DESC, timestamp DESC",
+            "fastest": f"{REVERT_SECONDS} IS NULL, {REVERT_SECONDS} ASC, timestamp DESC",
+        }.get(sort, "timestamp DESC")
         total = self._query(f"SELECT COUNT(*) AS n FROM edits WHERE {base}", params)[0]["n"]
         rows = self._query(f"SELECT * FROM edits WHERE {base} ORDER BY {order} LIMIT ? OFFSET ?",
                            params + [limit, offset])
@@ -276,6 +300,52 @@ class Database:
             "shown": shown,
             "since": self.get_state("first_run"),
         }
+
+    def shown_edits_since(self, since, shown_verdicts, shown_statuses, source="live"):
+        """Lightweight rows of the shown (confirmed, cleaned-up) edits since a timestamp, for the stats page."""
+        rows = self._query(
+            f"SELECT revid, pageid, title, user, timestamp, community, categories FROM edits "
+            f"WHERE source = ? AND timestamp >= ? AND verdict IN ({', '.join('?' for _ in shown_verdicts)}) "
+            f"AND status IN ({', '.join('?' for _ in shown_statuses)})",
+            [source, since, *shown_verdicts, *shown_statuses])
+        return [_decode(r) for r in rows]
+
+    def vandal_edit_counts(self, users, shown_verdicts, shown_statuses):
+        """{user: number of confirmed, cleaned-up edits} (live and page-history finds)."""
+        users = [u for u in set(users) if u]
+        counts = {}
+        for i in range(0, len(users), 500):
+            chunk = users[i:i + 500]
+            for r in self._query(
+                    f"SELECT user, COUNT(*) AS n FROM edits WHERE user IN ({', '.join('?' for _ in chunk)}) "
+                    f"AND verdict IN ({', '.join('?' for _ in shown_verdicts)}) "
+                    f"AND status IN ({', '.join('?' for _ in shown_statuses)}) GROUP BY user",
+                    [*chunk, *shown_verdicts, *shown_statuses]):
+                counts[r["user"]] = r["n"]
+        return counts
+
+    # -- watchlist ----------------------------------------------------------------------
+
+    def watch(self, pageid, title):
+        self._run("INSERT INTO watchlist (pageid, title, added_at) VALUES (?, ?, ?) "
+                  "ON CONFLICT(pageid) DO UPDATE SET title = excluded.title", (pageid, title, _now()))
+
+    def unwatch(self, pageid):
+        return self._run("DELETE FROM watchlist WHERE pageid = ?", (pageid,)) > 0
+
+    def watchlist(self):
+        return [dict(r) for r in self._query(
+            "SELECT w.pageid, w.title, w.added_at, (SELECT COUNT(*) FROM edits e WHERE e.pageid = w.pageid "
+            "AND e.verdict = 'confirmed' AND e.status IN ('reverted', 'hidden', 'deleted')) AS vandal_edits "
+            "FROM watchlist w ORDER BY w.title COLLATE NOCASE")]
+
+    def latest_watched_vandalism(self, limit, shown_verdicts, shown_statuses):
+        """Newest live-tracked confirmed vandalism on watched pages (for notifications)."""
+        return [dict(r) for r in self._query(
+            f"SELECT revid, title, user, timestamp FROM edits WHERE source = 'live' "
+            f"AND pageid IN (SELECT pageid FROM watchlist) AND verdict IN ({', '.join('?' for _ in shown_verdicts)}) "
+            f"AND status IN ({', '.join('?' for _ in shown_statuses)}) ORDER BY revid DESC LIMIT ?",
+            [*shown_verdicts, *shown_statuses, limit])]
 
     # -- housekeeping ---------------------------------------------------------------
 

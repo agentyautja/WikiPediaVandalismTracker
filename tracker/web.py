@@ -1,14 +1,17 @@
 """The local dashboard: a small Flask JSON API plus the static page in /static."""
 
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
 from flask import Flask, abort, jsonify, request, send_from_directory
 
 import config
-from .history import DEPTHS, SearchError
+from . import stats
+from .history import DEPTHS, SearchError, parse_page
 from .topics import ALL_CATEGORIES
+from .wiki import ApiError, WikiClient
 
 # Inside the .exe, bundled files are unpacked to sys._MEIPASS.
 STATIC_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "static"
@@ -47,10 +50,11 @@ def present(edit):
     diff = edit["diff"] or {}
     return {
         **{key: edit[key] for key in (
-            "revid", "title", "user", "timestamp", "comment", "edit_type", "badfaith", "damaging", "revert_risk",
+            "revid", "pageid", "title", "user", "timestamp", "comment", "edit_type", "badfaith", "damaging", "revert_risk",
             "content_score", "findings", "community", "status", "verdict", "confidence", "reasons", "categories",
             "check_count", "last_checked", "next_check", "stage", "source")},
         "favorite": bool(edit["favorite"]),
+        "revert_seconds": stats.revert_seconds(edit),
         "size_change": (edit["newlen"] or 0) - (edit["oldlen"] or 0),
         "diff": {"hunks": diff.get("hunks", []), "unavailable": diff.get("unavailable")},
         "links": links,
@@ -60,28 +64,90 @@ def present(edit):
 
 def create_app(db, monitor, wiki, profile, history):
     app = Flask(__name__, static_folder=str(STATIC_DIR), static_url_path="/static")
+    # For looking up pages added to the watchlist (web requests run in their own threads).
+    lookup = WikiClient(config.WIKI_DOMAIN, config.WIKI_LANG, config.CONTACT, profile["api_per_minute"],
+                        share_limits_with=wiki)
+
+    def with_items(result):
+        """Present the edits, plus how many vandal edits each of their editors has (repeat offenders)."""
+        result["items"] = [present(e) for e in result["items"]]
+        counts = db.vandal_edit_counts([e["user"] for e in result["items"]], SHOWN_VERDICTS, SHOWN_STATUSES)
+        result["offenders"] = {user: n for user, n in counts.items() if n >= 2}
+        return result
 
     @app.get("/")
     def index():
         return send_from_directory(STATIC_DIR, "index.html")
 
+    def revert_range(text):
+        """ "60-300" -> (60.0, 300.0), "21600-" -> (21600.0, None): a time-to-revert range in seconds."""
+        low, _, high = (text or "").partition("-")
+        try:
+            return (float(low) if low else None), (float(high) if high else None)
+        except ValueError:
+            return None, None
+
     @app.get("/api/edits")
     def edits():
         args = request.args
-        favorites = args.get("view") == "favorites"
+        view = args.get("view", "all")
+        user = args.get("user") or None
+        revert_min, revert_max = revert_range(args.get("revert"))
         result = db.list_edits(
             verdicts=SHOWN_VERDICTS,
             statuses=SHOWN_STATUSES,
-            source=None if favorites else "live",   # page-history finds have their own tab
-            favorites=favorites,
+            # The live feed leaves out page-history finds (they have their own tab), except when
+            # looking at one editor or at favourites / the watchlist.
+            source="live" if view == "all" and not user else None,
+            favorites=view == "favorites",
+            watched=view == "watchlist",
+            user=user,
+            revert_min=revert_min,
+            revert_max=revert_max,
             category=args.get("category") or None,
             query=args.get("q", "").strip(),
             sort=args.get("sort", "newest"),
             limit=min(args.get("limit", 50, type=int), 500),
             offset=args.get("offset", 0, type=int),
         )
-        result["items"] = [present(e) for e in result["items"]]
-        return jsonify(result)
+        return jsonify(with_items(result))
+
+    @app.get("/api/stats")
+    def stats_page():
+        days = min(max(request.args.get("days", 7, type=int), 1), config.KEEP_DAYS)
+        tz_minutes = request.args.get("tz", 0, type=int)   # the browser's offset from UTC
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        rows = db.shown_edits_since(since, SHOWN_VERDICTS, SHOWN_STATUSES)
+        counts = db.vandal_edit_counts([r["user"] for r in rows], SHOWN_VERDICTS, SHOWN_STATUSES)
+        return jsonify(stats.build(rows, days, tz_minutes, counts))
+
+    @app.get("/api/watchlist")
+    def watchlist():
+        return jsonify({"pages": db.watchlist()})
+
+    @app.post("/api/watchlist")
+    def watch_page():
+        body = request.get_json(silent=True) or {}
+        try:
+            if body.get("pageid") and body.get("title"):   # from a card: already known
+                page = {"pageid": int(body["pageid"]), "title": str(body["title"])}
+            else:
+                kind, value = parse_page(str(body.get("page", "")))
+                page = lookup.page_info(**{kind: value})
+                if page is None:
+                    return jsonify({"error": f"There's no page called “{value}” on {config.WIKI_DOMAIN}."}), 400
+        except SearchError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except ApiError as exc:
+            return jsonify({"error": f"Couldn't reach Wikipedia: {exc}"}), 502
+        db.watch(page["pageid"], page["title"])
+        return jsonify({"pageid": page["pageid"], "title": page["title"]})
+
+    @app.delete("/api/watchlist/<int:pageid>")
+    def unwatch_page(pageid):
+        if not db.unwatch(pageid):
+            abort(404)
+        return jsonify({"pageid": pageid, "watched": False})
 
     @app.get("/api/status")
     def status():
@@ -97,6 +163,9 @@ def create_app(db, monitor, wiki, profile, history):
             "recheck_minutes": config.RECHECK_AT_MINUTES,
             "categories": ALL_CATEGORIES,
             "wiki": config.WIKI_DOMAIN,
+            "watched_pageids": [p["pageid"] for p in db.watchlist()],
+            # newest live finds on watched pages, so the page can notify about new ones
+            "watch_latest": db.latest_watched_vandalism(10, SHOWN_VERDICTS, SHOWN_STATUSES),
         })
 
     @app.post("/api/history")
@@ -123,7 +192,7 @@ def create_app(db, monitor, wiki, profile, history):
         if search["pageid"]:   # every confirmed, cleaned-up vandal edit we know on this page
             result = db.list_edits(verdicts=SHOWN_VERDICTS, statuses=SHOWN_STATUSES, pageid=search["pageid"],
                                    limit=min(request.args.get("limit", 50, type=int), 500))
-        return jsonify({"search": search, "items": [present(e) for e in result["items"]], "total": result["total"]})
+        return jsonify({"search": search, **with_items(result)})
 
     @app.post("/api/edits/<int:revid>/favorite")
     def favorite(revid):

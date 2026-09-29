@@ -102,7 +102,19 @@ page again only checks the edits it hasn't seen yet, and your recent searches st
 
 ## Dashboard
 
-- Tabs: *All*, *★ Favourites* (live finds and page-history finds) and *🔍 Page history*.
+- Tabs: *All*, *★ Favourites* (live finds and page-history finds), *👁 Watchlist*, *🔍 Page history* and *📊 Stats*.
+- Every card shows how long the vandalism stayed up ("Reverted after 38 s"). Filter on it with the *Time to revert*
+  chips (under 1 min … over 6 h, or a custom range in minutes), sort by *Took longest to revert* or *Reverted
+  fastest*, or click a bar in the Stats page's time-to-revert chart to see those edits.
+- **Repeat offenders:** editors with more than one confirmed vandal edit get a "⚠ 3 vandal edits" link on their
+  cards; click it to see all their vandal edits.
+- **👁 Watchlist:** add pages (by name or link, or with "👁 Watch page" on any card). Confirmed vandalism on them is
+  listed in the tab, the tab shows a badge for new finds, and you can turn on desktop notifications (they work while
+  the dashboard is open in your browser).
+- **📊 Stats** for the last 24 hours, 7 or 14 days: when vandalism happens (per hour of the day in your local time,
+  and per day), time to revert (median, share within a minute, a histogram and the longest-surviving vandalism), who
+  cleaned it up (ClueBot NG, anti-vandalism tools, by hand, admins), the most vandalized pages and categories, the top
+  reverters, and a repeat-offenders table.
 - Category chips (Politics, Science, Sports, Music, Film & TV, Geography, People…), search and sort.
 - Click ☆ to favourite an edit. Favourites are kept forever; other edits are forgotten after `KEEP_DAYS`.
 - *↻ Re-check now* runs check 2 again straight away.

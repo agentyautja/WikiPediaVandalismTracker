@@ -72,13 +72,44 @@
       <select id="sort" aria-label="Sort">
         <option value="newest">Newest first</option>
         <option value="confidence">Most certain first</option>
+        <option value="slowest">Took longest to revert</option>
+        <option value="fastest">Reverted fastest</option>
       </select>
     </div>
   </nav>
 
+  <div id="user-filter" class="user-filter" hidden></div>
+
   <div class="filters" id="feed-filters">
     <div class="chiprow" id="category-chips" aria-label="Category"></div>
+    <div class="chiprow" id="revert-chips" aria-label="Time to revert"></div>
+    <form id="revert-custom" class="revert-custom" hidden>
+      <label>From <input type="number" id="revert-from" min="0" step="any" placeholder="0"> minutes</label>
+      <label>to <input type="number" id="revert-to" min="0" step="any" placeholder="no limit"> minutes</label>
+      <button class="btn" type="submit">Apply</button>
+    </form>
   </div>
+
+  <section id="watch-panel" class="history" hidden>
+    <form id="watch-form" class="history-form">
+      <input id="watch-page" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Add a page to watch: name or link" aria-label="Page to watch">
+      <button class="btn primary" type="submit">Watch page</button>
+      <button class="btn" type="button" id="notify-button">🔔 Desktop notifications</button>
+    </form>
+    <p class="history-hint">Confirmed vandalism on these pages shows up below, and you get a desktop notification
+      when it happens (while this dashboard is open in your browser).</p>
+    <div id="watch-pages" class="chiprow" aria-label="Watched pages"></div>
+    <div id="watch-status" class="history-status" hidden><div class="history-status-text"></div></div>
+  </section>
+
+  <section id="stats-panel" class="stats" hidden>
+    <div class="stats-head">
+      <h2>Stats</h2>
+      <div class="tabs" id="stats-range" role="tablist" aria-label="Period"></div>
+    </div>
+    <div id="stats-body"></div>
+  </section>
 
   <section id="history-panel" class="history" hidden>
     <form id="history-form" class="history-form">
@@ -96,7 +127,8 @@
   </section>
 
   <main id="list" aria-live="polite"></main>
-  <div class="footer-row">
+  <div id="tooltip" class="tooltip" role="tooltip" hidden></div>
+  <div class="footer-row" id="footer-row">
     <button id="more" class="btn" hidden>Load more</button>
     <span id="count" class="muted"></span>
   </div>
